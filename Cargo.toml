@@ -1,0 +1,20 @@
+[package]
+name = "lpd8_config"
+version = "0.1.0"
+authors = ["Colin Kinloch <colin@kinlo.ch>"]
+
+[dependencies]
+portmidi = { git = "https://github.com/ColinKinloch/portmidi-rs.git", version = "^0.2" }
+gtk = "^0"
+gio = "^0"
+
+crossbeam-utils = "^0.5"
+
+[features]
+default = ["gtk_3_22_30"]
+gtk_3_10 = ["gtk/v3_10"]
+gtk_3_16 = ["gtk_3_10", "gtk/v3_16"]
+gtk_3_18 = ["gtk_3_16", "gtk/v3_18"]
+gtk_3_20 = ["gtk_3_18", "gtk/v3_20"]
+gtk_3_22 = ["gtk_3_20", "gtk/v3_22"]
+gtk_3_22_30 = ["gtk_3_22", "gtk/v3_22_30"]
