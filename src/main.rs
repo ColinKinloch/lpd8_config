@@ -126,7 +126,7 @@ impl AppData {
 }
 
 // TODO: May be a race, pattern matching response?
-fn transact_sysex(in_name: &str, out_name: &str, request: &[u8], response_filter: &[u8], response_filter_ranges: &[Range<usize>]) -> Vec<u8> {
+fn transact_sysex(in_name: &str, out_name: &str, request: &[u8], response_filter: &[u8], response_filter_ranges: &[Range<usize>]) -> Option<Vec<u8>> {
     let (tx, rx) = channel();
     let in_port = MidiInput::new(&APP_NAME).unwrap();
     let (in_port_id, _) = (0..in_port.port_count())
@@ -138,13 +138,27 @@ fn transact_sysex(in_name: &str, out_name: &str, request: &[u8], response_filter
         .find(|(i, name)| name.clone() == out_name).unwrap();
         
     let in_connection = in_port.connect(in_port_id, &"out_hi", |t, message, (tx, response_filter, response_filter_ranges)| {
-        if response_filter_ranges.iter().all(|r| message[r.clone()] == response_filter[r.clone()]) {
+        
+        let mut data_str = String::new();
+        for d in message.iter() {
+            data_str += format!("{:02X?}, ", d).as_str();
+        }
+        println!("{}", data_str);
+        let mut data_str = String::new();
+        for d in response_filter.iter() {
+            data_str += format!("{:02X?}, ", d).as_str();
+        }
+        println!("{}", data_str);
+        
+        if message.len() == response_filter.len() && response_filter_ranges.iter().all(|r| message[r.clone()] == response_filter[r.clone()]) {
             tx.send(message.to_vec()).unwrap();
         }
     }, (tx, response_filter.to_vec(), response_filter_ranges.to_vec())).unwrap();
+    println!("{} => {}", in_name, out_name);
+    thread::sleep(Duration::from_millis(1));
     let mut out_connection = out_port.connect(out_port_id, &"out_hi").unwrap();
     out_connection.send(request);
-    rx.recv_timeout(Duration::from_millis(10)).unwrap()
+    if let Ok(response) = rx.recv_timeout(Duration::from_millis(200)) { Some(response) } else { None }
 }
 
 fn push_sysex(out_name: &str, request: &[u8]) {
@@ -154,6 +168,7 @@ fn push_sysex(out_name: &str, request: &[u8]) {
         .find(|(i, name)| name.clone() == out_name).unwrap();
     let mut out_connection = out_port.connect(out_port_id, &"out_hi").unwrap();
     out_connection.send(request);
+    thread::sleep(Duration::from_millis(20))
 }
 
 fn check_info(message: &[u8]) -> bool {
@@ -183,7 +198,7 @@ fn check_info(message: &[u8]) -> bool {
         3..13,
         14..20,
     ];
-    TEST_RANGES.iter().all(|r| EXPECTED[r.clone()] == message[r.clone()])
+    message.len() == EXPECTED.len() && TEST_RANGES.iter().all(|r| EXPECTED[r.clone()] == message[r.clone()])
 }
 
 fn download_program(device_id: &DeviceIDs, id: u8) -> Result<Program, ()> {
@@ -208,7 +223,10 @@ fn download_program(device_id: &DeviceIDs, id: u8) -> Result<Program, ()> {
     ];
     let response = transact_sysex(&(device_id.0).1, &(device_id.1).1,
         &program_request, RES_EXP, &REC_PROGRAM_TEST_RANGES);
-    Ok(parse_program(&response).unwrap())
+    
+    if let Some(response) = response {
+      Ok(parse_program(&response).unwrap())
+    } else { Err(()) }
 }
 
 fn upload_program(device_id: &DeviceIDs, id: u8, program: &Program) {
@@ -234,7 +252,7 @@ fn set_active_program_id(device_id: &DeviceIDs, p_id: u8) {
     push_sysex(&(device_id.1).1, &set_program_request);
 }
 
-fn get_active_program_id(device_id: &DeviceIDs) -> u8 {
+fn get_active_program_id(device_id: &DeviceIDs) -> Option<u8> {
     let p_id_request = [
         0xF0,
         0x47,
@@ -250,7 +268,9 @@ fn get_active_program_id(device_id: &DeviceIDs) -> u8 {
     ];
     let response = transact_sysex(&(device_id.0).1, &(device_id.1).1,
         &p_id_request, P_ID_RESP, &P_ID_TEST_RANGES);
-    *response.get(7).unwrap()
+    if let Some(response) = response {
+      Some(*response.get(7).unwrap())
+    } else { None }
 }
 
 fn parse_program(message: &[u8]) -> Result<Program, ()> {
@@ -348,7 +368,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
             let mut port = MidiOutput::new(&name).unwrap();
             let mut connection = port.connect(*i, &name).unwrap();
             connection.send(REQ_DEVICE_INFO).unwrap();
-            if let Ok(id) = rx.recv_timeout(Duration::from_millis(50)) {
+            if let Ok(id) = rx.recv_timeout(Duration::from_millis(100)) {
                 println!("LPD8 is \"{:?}\"", id);
                 device_list.insert_with_values(None, &[0, 1, 2, 3, 4], &[
                     &format!("{}/{}", device_name, id.1),
@@ -385,7 +405,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
         let mut app_data = app_data_mutex.lock().unwrap();
         let device_id_mutex = app_data.device_id.clone();
         let initial_p_id = if let Some(device_id) = device_id_mutex.lock().unwrap().clone() {
-            get_active_program_id(&device_id)
+            if let Some(id) = get_active_program_id(&device_id) { id } else { 1 }
         } else { 1 };
         initial_p_id
     };
@@ -399,7 +419,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
             
             let program = {
                 let program = if let Some(device_id) = device_id_mutex.lock().unwrap().clone() {
-                    download_program(&device_id, id).unwrap()
+                    if let Ok(program) = download_program(&device_id, id) { program } else { Program::default() }
                 } else {
                     Program::default()
                 };
