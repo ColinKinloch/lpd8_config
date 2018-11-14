@@ -70,6 +70,14 @@ impl Default for Program {
   }
 }
 
+fn phex(rep: &[u8]) -> String {
+  let mut this_str = String::new();
+  for this_data in rep.iter() {
+    this_str += format!("{:02X?}, ", this_data).as_str();
+  }
+  this_str
+}
+
 fn sysex_comm(input_port: &mut pm::InputPort, output_port: &pm::OutputPort, request: &[u8]) -> Vec<u8> {
   let mut req = vec![0xF0];
   req.extend_from_slice(request);
@@ -100,6 +108,26 @@ fn sysex_comm(input_port: &mut pm::InputPort, output_port: &pm::OutputPort, requ
   }
   let rep = rep.lock().unwrap();
   rep.clone()
+}
+
+fn identify(input_port: &mut pm::InputPort, output_port: &pm::OutputPort) {
+  let rep = sysex_comm(input_port, output_port, &[
+      0x7E,
+      0x7F,
+      0x06, 0x01
+    ]);
+  println!("identify: {}", phex(&rep));
+  let dev_id = &rep[5..9];
+  let ver = &rep[9..13];
+  println!("device: {} version: {}", phex(&dev_id), phex(&ver));
+  const IDENT_RESP_HEADER: [u8; 5] = [
+    0xF0, // SysEx
+    0x7E, // Non-Realtime
+    0x0A, // channel (0x00-0x7F)
+    0x06, // General Info
+    0x02 // Identity Reply
+    ];
+  assert!(rep[0..5].iter().zip(IDENT_RESP_HEADER.iter()).all(|(a, b)| a == b));
 }
 
 fn activate_program(output_port: &pm::OutputPort, prog: u8) {
@@ -269,6 +297,7 @@ fn startup(application: &gtk::Application) {
   let init_program_id = {
     let mut input = input_mutex.lock().unwrap();
     let output = output_mutex.lock().unwrap();
+    identify(&mut input, &output);
     get_active_program_id(&mut input, &output)
   };
   println!("Initial ID is {}", init_program_id);
