@@ -5,7 +5,7 @@ edition = "2018"
 authors = ["Colin Kinloch <colin@kinlo.ch>"]
 
 [dependencies]
-midir = { version="0.5.0" }
+midir = "^0.5"
 
 gtk = "^0"
 gio = "^0"

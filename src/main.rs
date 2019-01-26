@@ -32,6 +32,30 @@ const BUF_LEN: usize = 1024;
 
 const REQ_DEVICE_INFO: &[u8] = &[0xF0, 0x7E, 0x00, 0x06, 0x01, 0xF7];
 
+const SYSEX_START: &[u8] = &[0xF0];
+const SYSEX_END: &[u8] = &[0xF7];
+const SYSEX_NON_REALTIME: &[u8] = &[0x7E];
+const MAN_AKAI: &[u8] = &[0x47];
+const MDL_LPD8: &[u8] = &[0x7F, 0x75];
+
+enum LPD8Message {
+  UploadProgram,
+  SetActiveProgram,
+  DownloadProgram,
+  GetActiveProgram,
+}
+
+impl LPD8Message {
+  fn to_pattern(&self) -> u8 {
+    match (self) {
+      UploadProgram => 0x61,
+      SetActiveProgram => 062,
+      DownloadProgram => 0x63,
+      GetActiveProgram => 0x64,
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 struct PortID(usize, String);
 #[derive(Debug, Clone)]
@@ -96,23 +120,14 @@ enum Response {
 
 //TODO: Wrap Programs in arc mutexes to avaid poison
 struct AppData {
-    in_connection: Option<midir::MidiInputConnection<Arc<Mutex<AppData>>>>,
-    out_connection: Option<midir::MidiOutputConnection>,
     device_ids: Vec<DeviceIDs>,
     device_id: Arc<Mutex<Option<DeviceIDs>>>,
-    response_tx: Sender<Response>,
-    response_rx: Receiver<Response>,
     programs: [Arc<Mutex<Program>>; 4],
 }
 
 impl AppData {
     fn new() -> AppData {
-        let (tx, rx) = channel();
         AppData {
-            in_connection: None,
-            out_connection: None,
-            response_tx: tx,
-            response_rx: rx,
             device_ids: Vec::new(),
             device_id: Arc::new(Mutex::new(None)),
             programs: [
@@ -148,7 +163,7 @@ fn transact_sysex(in_name: &str, out_name: &str, request: &[u8], response_filter
         for d in response_filter.iter() {
             data_str += format!("{:02X?}, ", d).as_str();
         }
-        println!("{}", data_str);
+        println!("{}: {}", message.len(), data_str);
         
         if message.len() == response_filter.len() && response_filter_ranges.iter().all(|r| message[r.clone()] == response_filter[r.clone()]) {
             tx.send(message.to_vec()).unwrap();
@@ -158,7 +173,7 @@ fn transact_sysex(in_name: &str, out_name: &str, request: &[u8], response_filter
     thread::sleep(Duration::from_millis(1));
     let mut out_connection = out_port.connect(out_port_id, &"out_hi").unwrap();
     out_connection.send(request);
-    if let Ok(response) = rx.recv_timeout(Duration::from_millis(200)) { Some(response) } else { None }
+    if let Ok(response) = rx.recv_timeout(Duration::from_millis(2000)) { Some(response) } else { None }
 }
 
 fn push_sysex(out_name: &str, request: &[u8]) {
@@ -166,14 +181,26 @@ fn push_sysex(out_name: &str, request: &[u8]) {
     let (out_port_id, _) = (0..out_port.port_count())
         .map(|i| (i, out_port.port_name(i).unwrap()))
         .find(|(i, name)| name.clone() == out_name).unwrap();
-    let mut out_connection = out_port.connect(out_port_id, &"out_hi").unwrap();
-    out_connection.send(request);
-    thread::sleep(Duration::from_millis(20))
+    let mut out_connection = out_port.connect(out_port_id, &"push_sysex").unwrap();
+    
+    println!("sending it '{}'", out_name);
+    //thread::sleep(Duration::from_millis(300));
+    
+    let mut data_str = String::new();
+    for d in request.iter() {
+        data_str += format!("{:02X?}, ", d).as_str();
+    }
+    println!("{}: {}", request.len(), data_str);
+    
+    out_connection.send(request).unwrap();
+    thread::sleep(Duration::from_millis(18));
 }
 
 fn check_info(message: &[u8]) -> bool {
     const EXPECTED: &[u8] = &[
-        0xF0, 0x7E, 0x00, 0x06, 0x02, 0x47, 0x75, 0x00,
+        0xF0,
+        0x7E,
+        0x00, 0x06, 0x02, 0x47, 0x75, 0x00,
         0x19, 0x00, 0x00, 0x00, 0x66, 0x7F, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -202,16 +229,23 @@ fn check_info(message: &[u8]) -> bool {
 }
 
 fn download_program(device_id: &DeviceIDs, id: u8) -> Result<Program, ()> {
-    let program_request = [
+    let program_request = SYSEX_START.iter()
+    .chain(MAN_AKAI)
+    .chain(MDL_LPD8)
+    .chain(&[
+      0x63,
+      0x00, 0x01,
+      id,
+    ])
+    .chain(SYSEX_END)
+    .map(|&v| v).collect::<Vec<_>>();
+    
+    const RES_EXP: &[u8] = &[
         0xF0,
         0x47,
         0x7F, 0x75,
-        0x63, 0x00, 0x01,
-        id,
-        0xF7,
-    ];
-    const RES_EXP: &[u8] = &[
-        0xF0, 0x47, 0x7F, 0x75, 0x63, 0x00, 0x3A, 0x01, 0x00, 0x20, 0x01,
+        0x63,
+        0x00, 0x3A, 0x01, 0x00, 0x20, 0x01,
         0x00, 0x00, 0x32, 0x01, 0x01, 0x00, 0x29, 0x00, 0x01, 0x00, 0x2A,
         0x03, 0x01, 0x00, 0x31, 0x27, 0x01, 0x00, 0x27, 0x00, 0x01, 0x00,
         0x33, 0x00, 0x01, 0x00, 0x39, 0x02, 0x00, 0x00, 0x01, 0x00, 0x7F,
@@ -230,13 +264,15 @@ fn download_program(device_id: &DeviceIDs, id: u8) -> Result<Program, ()> {
 }
 
 fn upload_program(device_id: &DeviceIDs, id: u8, program: &Program) {
-    let mut program_upload_request = vec![
-        0xF0,
-        0x47,
-        0x7F, 0x75,
+    let mut program_upload_request = SYSEX_START.iter()
+    .chain(MAN_AKAI)
+    .chain(MDL_LPD8)
+    .chain(&[
         0x61, 0x00, 0x3A, id,
         program.channel
-    ];
+    ])
+    .map(|&v| v).collect::<Vec<_>>();
+    
     for pad in program.pads.iter() {
         program_upload_request.extend(&[pad.note, pad.program_change, pad.control_change, if pad.toggle {1} else {0}]);
     }
@@ -244,7 +280,10 @@ fn upload_program(device_id: &DeviceIDs, id: u8, program: &Program) {
         program_upload_request.extend(&[knob.control_change, knob.low, knob.high]);
     }
     program_upload_request.push(0xF7);
+    
     push_sysex(&(device_id.1).1, &program_upload_request);
+    //transact_sysex(&(device_id.0).1, &(device_id.1).1,
+    //    &program_upload_request, &[], &[]);
 }
 
 fn set_active_program_id(device_id: &DeviceIDs, p_id: u8) {
@@ -253,13 +292,15 @@ fn set_active_program_id(device_id: &DeviceIDs, p_id: u8) {
 }
 
 fn get_active_program_id(device_id: &DeviceIDs) -> Option<u8> {
-    let p_id_request = [
-        0xF0,
-        0x47,
-        0x7F, 0x75,
+    let p_id_request = SYSEX_START.iter()
+    .chain(MAN_AKAI)
+    .chain(MDL_LPD8)
+    .chain(&[
         0x64, 0x00, 0x00,
-        0xF7,
-    ];
+    ])
+    .chain(SYSEX_END)
+    .map(|&v| v).collect::<Vec<_>>();
+    
     const P_ID_RESP: &[u8] = &[
         0xF0, 0x47, 0x7F, 0x75, 0x64, 0x00, 0x01, 0x04, 0xF7,
     ];
@@ -275,12 +316,12 @@ fn get_active_program_id(device_id: &DeviceIDs) -> Option<u8> {
 
 fn parse_program(message: &[u8]) -> Result<Program, ()> {
     let pads = {
-        let mut i = message.get(9..40).unwrap().chunks(4).map(|p| {
+        let mut i = message.get(9..41).unwrap().chunks(4).map(|p| {
             Pad {
                 note: *p.get(0).unwrap(),
                 program_change: *p.get(1).unwrap(),
                 control_change: *p.get(2).unwrap(),
-                toggle: *p.get(0).unwrap() == 1,
+                toggle: *p.get(3).unwrap() == 1,
             }
         });
         [
@@ -321,8 +362,8 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
     let device_list: gtk::ListStore = builder.get_object("device-list").expect("no midi list model");
     let device_select: gtk::ComboBox = builder.get_object("device-select").expect("dev sel not good");
     
-    let midi_in = MidiInput::new("midir test input").unwrap();
-    let midi_out = MidiOutput::new("midir test input").unwrap();
+    let midi_in = MidiInput::new(&APP_NAME).unwrap();
+    let midi_out = MidiOutput::new(&APP_NAME).unwrap();
     
     println!("in: {}\nout: {}", midi_in.port_count(), midi_out.port_count());
     
@@ -358,7 +399,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                 for d in data.iter() {
                     data_str += format!("{:02X?}, ", d).as_str();
                 }
-                println!("{}", data_str);
+                println!("{}: {}", data.len(), data_str);
             }, app_data_mutex.clone());
             connection
         }).collect::<Vec<_>>();
@@ -391,15 +432,9 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
         for d in data.iter() {
             data_str += format!("{:02X?}, ", d).as_str();
         }
-        println!("{}", data_str);
+        println!("{}: {}", data.len(), data_str);
     }, app_data_mutex.clone()).unwrap();
     let out_connection = midi_out.connect(output_id, &APP_NAME).unwrap();
-    
-    {
-        let mut app_data = app_data_mutex.lock().unwrap();
-        app_data.in_connection = Some(in_connection);
-        app_data.out_connection = Some(out_connection);
-    }
     
     let initial_p_id = {
         let mut app_data = app_data_mutex.lock().unwrap();
@@ -472,7 +507,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                 let program_mutex = program_mutex.clone();
                 let device_id_mutex = device_id_mutex.clone();
                 push_button.connect_clicked(move |_button| {
-                    println!("push the val");
+                    println!("push PROG {}", id);
                     if let Some(device_id) = device_id_mutex.lock().unwrap().clone() {
                         let program = program_mutex.lock().unwrap();
                         upload_program(&device_id, id, &program);
@@ -661,6 +696,10 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
     
     {
         let app_data_mutex = app_data_mutex.clone();
+        let device_id_mutex = {
+          let app_data = app_data_mutex.lock().unwrap();
+          app_data.device_id.clone()
+        };
         device_select.connect_changed(move |device_select| {
             // Change in_connection and out_connection
             let it = device_select.get_active_iter().unwrap();
@@ -677,6 +716,10 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
             let (out_port_id, _) = (0..out_port.port_count())
                 .map(|i| (i, out_port.port_name(i).unwrap()))
                 .find(|(i, name)| name.clone() == out_port_name).unwrap();
+            
+            let d_id = DeviceIDs(PortID(in_port_id, in_port_name), PortID(out_port_id, out_port_name));
+            
+            *device_id_mutex.lock().unwrap() = Some(d_id);
             
             /*let in_connection = in_port.connect(in_port_id, &APP_NAME, |t, message, app_data_mutex| {
                 let mut response = None;
