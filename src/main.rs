@@ -7,9 +7,7 @@ extern crate crossbeam_utils as cbu;
 
 use std::thread;
 
-use std::cell::RefCell;
-
-use std::sync::mpsc::{channel, Sender, Receiver};
+use std::sync::mpsc::channel;
 use std::sync::Mutex;
 use std::sync::Arc;
 
@@ -47,9 +45,9 @@ enum LPD8Message {
 
 impl LPD8Message {
   fn to_pattern(&self) -> u8 {
-    match (self) {
+    match self {
       UploadProgram => 0x61,
-      SetActiveProgram => 062,
+      SetActiveProgram => 0x62,
       DownloadProgram => 0x63,
       GetActiveProgram => 0x64,
     }
@@ -146,13 +144,13 @@ fn transact_sysex(in_name: &str, out_name: &str, request: &[u8], response_filter
     let in_port = MidiInput::new(&APP_NAME).unwrap();
     let (in_port_id, _) = (0..in_port.port_count())
         .map(|i| (i, in_port.port_name(i).unwrap()))
-        .find(|(i, name)| name.clone() == in_name).unwrap();
+        .find(|(_i, name)| name.clone() == in_name).unwrap();
     let out_port = MidiOutput::new(&APP_NAME).unwrap();
     let (out_port_id, _) = (0..out_port.port_count())
         .map(|i| (i, out_port.port_name(i).unwrap()))
-        .find(|(i, name)| name.clone() == out_name).unwrap();
+        .find(|(_i, name)| name.clone() == out_name).unwrap();
         
-    let in_connection = in_port.connect(in_port_id, &"out_hi", |t, message, (tx, response_filter, response_filter_ranges)| {
+    let _in_connection = in_port.connect(in_port_id, &APP_NAME, |_t, message, (tx, response_filter, response_filter_ranges)| {
         
         let mut data_str = String::new();
         for d in message.iter() {
@@ -171,8 +169,8 @@ fn transact_sysex(in_name: &str, out_name: &str, request: &[u8], response_filter
     }, (tx, response_filter.to_vec(), response_filter_ranges.to_vec())).unwrap();
     println!("{} => {}", in_name, out_name);
     thread::sleep(Duration::from_millis(1));
-    let mut out_connection = out_port.connect(out_port_id, &"out_hi").unwrap();
-    out_connection.send(request);
+    let mut out_connection = out_port.connect(out_port_id, &APP_NAME).unwrap();
+    out_connection.send(request).unwrap();
     if let Ok(response) = rx.recv_timeout(Duration::from_millis(2000)) { Some(response) } else { None }
 }
 
@@ -180,7 +178,7 @@ fn push_sysex(out_name: &str, request: &[u8]) {
     let out_port = MidiOutput::new(&APP_NAME).unwrap();
     let (out_port_id, _) = (0..out_port.port_count())
         .map(|i| (i, out_port.port_name(i).unwrap()))
-        .find(|(i, name)| name.clone() == out_name).unwrap();
+        .find(|(_i, name)| name.clone() == out_name).unwrap();
     let mut out_connection = out_port.connect(out_port_id, &"push_sysex").unwrap();
     
     println!("sending it '{}'", out_name);
@@ -238,7 +236,7 @@ fn download_program(device_id: &DeviceIDs, id: u8) -> Result<Program, ()> {
       id,
     ])
     .chain(SYSEX_END)
-    .map(|&v| v).collect::<Vec<_>>();
+    .cloned().collect::<Vec<_>>();
     
     const RES_EXP: &[u8] = &[
         0xF0,
@@ -271,7 +269,7 @@ fn upload_program(device_id: &DeviceIDs, id: u8, program: &Program) {
         0x61, 0x00, 0x3A, id,
         program.channel
     ])
-    .map(|&v| v).collect::<Vec<_>>();
+    .cloned().collect::<Vec<_>>();
     
     for pad in program.pads.iter() {
         program_upload_request.extend(&[pad.note, pad.program_change, pad.control_change, if pad.toggle {1} else {0}]);
@@ -299,7 +297,7 @@ fn get_active_program_id(device_id: &DeviceIDs) -> Option<u8> {
         0x64, 0x00, 0x00,
     ])
     .chain(SYSEX_END)
-    .map(|&v| v).collect::<Vec<_>>();
+    .cloned().collect::<Vec<_>>();
     
     const P_ID_RESP: &[u8] = &[
         0xF0, 0x47, 0x7F, 0x75, 0x64, 0x00, 0x01, 0x04, 0xF7,
@@ -310,18 +308,18 @@ fn get_active_program_id(device_id: &DeviceIDs) -> Option<u8> {
     let response = transact_sysex(&(device_id.0).1, &(device_id.1).1,
         &p_id_request, P_ID_RESP, &P_ID_TEST_RANGES);
     if let Some(response) = response {
-      Some(*response.get(7).unwrap())
+      Some(response[7])
     } else { None }
 }
 
 fn parse_program(message: &[u8]) -> Result<Program, ()> {
     let pads = {
-        let mut i = message.get(9..41).unwrap().chunks(4).map(|p| {
+        let mut i = message[9..41].chunks(4).map(|p| {
             Pad {
-                note: *p.get(0).unwrap(),
-                program_change: *p.get(1).unwrap(),
-                control_change: *p.get(2).unwrap(),
-                toggle: *p.get(3).unwrap() == 1,
+                note: p[0],
+                program_change: p[1],
+                control_change: p[2],
+                toggle: p[3] == 1,
             }
         });
         [
@@ -330,11 +328,11 @@ fn parse_program(message: &[u8]) -> Result<Program, ()> {
         ]
     };
     let knobs = {
-        let mut i = message.get(41..65).unwrap().chunks(3).map(|p| {
+        let mut i = message[41..65].chunks(3).map(|p| {
             Knob {
-                control_change: *p.get(0).unwrap(),
-                low: *p.get(1).unwrap(),
-                high: *p.get(2).unwrap(),
+                control_change: p[0],
+                low: p[1],
+                high: p[2],
             }
         });
         [
@@ -344,9 +342,9 @@ fn parse_program(message: &[u8]) -> Result<Program, ()> {
     };
     
     Ok(Program {
-        channel: *message.get(8).unwrap(),
-        pads: pads,
-        knobs: knobs,
+        channel: message[8],
+        pads,
+        knobs,
     })
 }
 
@@ -368,10 +366,12 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
     println!("in: {}\nout: {}", midi_in.port_count(), midi_out.port_count());
     
     let (input_id, output_id) = {
-        let input_id = (0..midi_in.port_count()).map(|i| (i, midi_in.port_name(i).unwrap_or(String::new())))
-            .filter(|(i, name)| true).collect::<Vec<_>>();
-        let output_id = (0..midi_out.port_count()).map(|i| (i, midi_out.port_name(i).unwrap_or(String::new())))
-            .filter(|(i, name)| true).collect::<Vec<_>>();
+        let input_id = (0..midi_in.port_count()).map(|i| (i, midi_in.port_name(i).unwrap_or_default()))
+            //.filter(|(i, name)| true)
+            .collect::<Vec<_>>();
+        let output_id = (0..midi_out.port_count()).map(|i| (i, midi_out.port_name(i).unwrap_or_default()))
+            //.filter(|(i, name)| true)
+            .collect::<Vec<_>>();
         
         (input_id, output_id)
     };
@@ -385,13 +385,13 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
     
     {
         let (tx, rx) = channel();
-        let connections = output_id.iter().map(|(i, device_name)| {
+        let _connections = output_id.iter().map(|(i, device_name)| {
             let i = *i;
             let device_name = device_name.clone();
             let name = format!("{}_response:{}", APP_NAME, i);
             let port = MidiInput::new(&name).unwrap();
             let tx = tx.clone();
-            let mut connection = port.connect(i, &name, move |t, data: &[u8], app_data_mutex| {
+            port.connect(i, &name, move |_t, data: &[u8], _app_data_mutex| {
                 if check_info(&data) {
                     tx.send((i, device_name.clone())).unwrap();
                 }
@@ -400,13 +400,12 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                     data_str += format!("{:02X?}, ", d).as_str();
                 }
                 println!("{}: {}", data.len(), data_str);
-            }, app_data_mutex.clone());
-            connection
+            }, app_data_mutex.clone())
         }).collect::<Vec<_>>();
         
         for (i, device_name) in input_id.iter() {
             let name = format!("{}_call:{}", APP_NAME, i);
-            let mut port = MidiOutput::new(&name).unwrap();
+            let port = MidiOutput::new(&name).unwrap();
             let mut connection = port.connect(*i, &name).unwrap();
             connection.send(REQ_DEVICE_INFO).unwrap();
             if let Ok(id) = rx.recv_timeout(Duration::from_millis(100)) {
@@ -426,7 +425,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
     let input_id = input_id.iter().next().unwrap().0;
     
     println!("{}", midi_in.port_name(input_id).unwrap());
-    let in_connection = midi_in.connect(input_id, &APP_NAME, |t, data, app_data_mutex| {
+    let _in_connection = midi_in.connect(input_id, &APP_NAME, |_t, data, _app_data_mutex| {
         println!("message");
         let mut data_str = String::new();
         for d in data.iter() {
@@ -434,15 +433,17 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
         }
         println!("{}: {}", data.len(), data_str);
     }, app_data_mutex.clone()).unwrap();
-    let out_connection = midi_out.connect(output_id, &APP_NAME).unwrap();
+    let _out_connection = midi_out.connect(output_id, &APP_NAME).unwrap();
     
     let initial_p_id = {
-        let mut app_data = app_data_mutex.lock().unwrap();
+        let app_data = app_data_mutex.lock().unwrap();
         let device_id_mutex = app_data.device_id.clone();
-        let initial_p_id = if let Some(device_id) = device_id_mutex.lock().unwrap().clone() {
-            if let Some(id) = get_active_program_id(&device_id) { id } else { 1 }
-        } else { 1 };
-        initial_p_id
+        {
+            let device_id = device_id_mutex.lock().unwrap().clone();
+            if let Some(device_id) = device_id {
+                if let Some(id) = get_active_program_id(&device_id) { id } else { 1 }
+            } else { 1 }
+        }
     };
     
     // let (a_send, a_rec) = channel();
@@ -480,7 +481,6 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
             prog_prof.add(&pull_button);
             
             {
-                let app_data_mutex = app_data_mutex.clone();
                 let program_mutex = program_mutex.clone();
                 let device_id_mutex = device_id_mutex.clone();
                 pull_button.connect_clicked(move |_button| {
@@ -503,7 +503,6 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
             push_button.set_label("Push");
             prog_prof.add(&push_button);
             {
-                let app_data_mutex = app_data_mutex.clone();
                 let program_mutex = program_mutex.clone();
                 let device_id_mutex = device_id_mutex.clone();
                 push_button.connect_clicked(move |_button| {
@@ -516,7 +515,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                 });
             }
             
-            let chan_adj = gtk::Adjustment::new(program.channel as f64,
+            let chan_adj = gtk::Adjustment::new(f64::from(program.channel),
                 0.0, 127.0,
                 1.0, 0.0, 0.0);
             let chan_entry = gtk::SpinButton::new(Some(&chan_adj),
@@ -550,7 +549,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                 pad_lb.set_property("selection-mode", &gtk::SelectionMode::None).unwrap();
                 //pad_lb.set_property("activate-on-single-click", &false); ???
                 
-                let note_adj = gtk::Adjustment::new(pad.note as f64,
+                let note_adj = gtk::Adjustment::new(f64::from(pad.note),
                     0.0, 127.0,
                     1.0, 0.0, 0.0);
                 let note_entry = gtk::SpinButton::new(Some(&note_adj),
@@ -565,7 +564,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                 }
                 pad_lb.add(&note_entry);
                 
-                let prog_adj = gtk::Adjustment::new(pad.program_change as f64,
+                let prog_adj = gtk::Adjustment::new(f64::from(pad.program_change),
                     0.0, 127.0,
                     1.0, 0.0, 0.0);
                 let prog_entry = gtk::SpinButton::new(Some(&prog_adj),
@@ -580,7 +579,8 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                 }
                 pad_lb.add(&prog_entry);
                 
-                let ctrl_adj = gtk::Adjustment::new(pad.control_change as f64,
+                let ctrl_adj = gtk::Adjustment::new(f64::from(pad.control_change)
+                ,
                     0.0, 127.0,
                     1.0, 0.0, 0.0);
                 let ctrl_entry = gtk::SpinButton::new(Some(&ctrl_adj),
@@ -632,7 +632,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                 let knob_conf = gtk::Frame::new(format!("K{}", k_id + 1).as_str());
                 let knob_lb = gtk::ListBox::new();
                 
-                let ctrl_adj = gtk::Adjustment::new(knob.control_change as f64,
+                let ctrl_adj = gtk::Adjustment::new(f64::from(knob.control_change),
                     0.0, 127.0,
                     1.0, 0.0, 0.0);
                 let ctrl_entry = gtk::SpinButton::new(Some(&ctrl_adj),
@@ -648,7 +648,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                 }
                 knob_lb.add(&ctrl_entry);
                 
-                let low_adj = gtk::Adjustment::new(knob.low as f64,
+                let low_adj = gtk::Adjustment::new(f64::from(knob.low),
                     0.0, 127.0,
                     1.0, 0.0, 0.0);
                 let low_entry = gtk::SpinButton::new(Some(&low_adj),
@@ -663,7 +663,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
                 }
                 knob_lb.add(&low_entry);
                 
-                let high_adj = gtk::Adjustment::new(knob.high as f64,
+                let high_adj = gtk::Adjustment::new(f64::from(knob.high),
                     0.0, 127.0,
                     1.0, 0.0, 0.0);
                 let high_entry = gtk::SpinButton::new(Some(&high_adj),
@@ -704,18 +704,18 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
             // Change in_connection and out_connection
             let it = device_select.get_active_iter().unwrap();
             let device_list = device_select.get_model().unwrap();
-            let device_name = device_list.get_value(&it, 0).get::<String>();
+            let _device_name = device_list.get_value(&it, 0).get::<String>();
             let in_port_name = device_list.get_value(&it, 2).get::<String>().unwrap();
             let out_port_name = device_list.get_value(&it, 4).get::<String>().unwrap();
             println!("Device select is in: {}, out: {}", in_port_name, out_port_name);
             let in_port = MidiInput::new(&APP_NAME).unwrap();
             let (in_port_id, _) = (0..in_port.port_count())
                 .map(|i| (i, in_port.port_name(i).unwrap()))
-                .find(|(i, name)| name.clone() == in_port_name).unwrap();
+                .find(|(_i, name)| name.clone() == in_port_name).unwrap();
             let out_port = MidiOutput::new(&APP_NAME).unwrap();
             let (out_port_id, _) = (0..out_port.port_count())
                 .map(|i| (i, out_port.port_name(i).unwrap()))
-                .find(|(i, name)| name.clone() == out_port_name).unwrap();
+                .find(|(_i, name)| name.clone() == out_port_name).unwrap();
             
             let d_id = DeviceIDs(PortID(in_port_id, in_port_name), PortID(out_port_id, out_port_name));
             
@@ -775,7 +775,7 @@ fn startup(application: &gtk::Application, app_data_mutex: &Arc<Mutex<AppData>>)
             // Switch device program
             let i = stack.get_visible_child_name().unwrap().parse::<u8>().unwrap();
             println!("visible child is {}", i);
-            let mut app_data = app_data_mutex.lock().unwrap();
+            let app_data = app_data_mutex.lock().unwrap();
             if let Some(device_id) = app_data.device_id.lock().unwrap().clone() {
                 set_active_program_id(&device_id, i);
             }
